@@ -143,6 +143,7 @@ def run_pipeline(
             "idx": s.idx,
             "text": s.text,
             "top_label": r["top_label"],
+            "best_label": r["best_label"],
             "top_score": r["top_score"],
             "labels": "|".join(r["labels"]),
             "confident": r["confident"],
@@ -169,7 +170,9 @@ def run_pipeline(
     )
     print(
         f"Samples: {report['n_samples']} | "
-        f"Confident: {report['n_confident']} ({report['confident_rate']:.1%})"
+        f"Confident: {report['n_confident']} ({report['confident_rate']:.1%}) | "
+        f"NONE: {report.get('n_unlabeled_NONE', 0)} "
+        f"({report.get('none_rate', 0.0):.1%})"
     )
     from facts import CATEGORY_KEYS
 

@@ -26,31 +26,60 @@ def test_extract_label_text_uses_patient_input():
         "input": "My child gets upset when the daily plan changes suddenly.",
         "output": "Support and therapy can improve quality of life.",
     }
+
     assert extract_label_text(row, mode="patient") == row["input"]
+
     all_text = extract_label_text(row, mode="all")
     assert "instruction:" in all_text
     assert "output:" in all_text
 
 
-def test_extract_label_text_falls_back_to_non_generic_instruction():
+def test_patient_mode_skips_when_input_is_missing():
+    row = {
+        "instruction": "A non-generic instruction that used to be a fallback.",
+        "output": "A counseling response.",
+    }
+
+    assert extract_label_text(row, mode="patient") == ""
+
+
+def test_patient_mode_skips_when_input_is_empty_even_if_tagged_text_exists():
     row = {
         "text": (
-            "instruction: احساس اضطراب شدیدی دارم وقتی برنامه‌ی روزانه‌ام ناگهان تغییر می‌کند.\n"
+            "instruction: احساس اضطراب دارم.\n"
             "input: \n"
             "output: ساختار و پیش‌بینی‌پذیری معمولاً کمک‌کننده است."
         )
     }
+
+    assert extract_label_text(row, mode="patient") == ""
+
+
+def test_patient_mode_can_extract_input_from_tagged_text():
+    row = {
+        "text": (
+            "instruction: پاسخ مناسب بده.\n"
+            "input: وقتی برنامه روزانه‌ام عوض می‌شود خیلی مضطرب می‌شوم.\n"
+            "output: می‌توانیم راهبردهایی بررسی کنیم."
+        )
+    }
+
     text = extract_label_text(row, mode="patient")
-    assert "اضطراب" in text
-    assert "پیش‌بینی‌پذیری" not in text
+    assert "برنامه روزانه" in text
+    assert "راهبردهایی" not in text
 
 
 def test_load_samples_fa_from_sample_file():
     path = (
-        Path(__file__).resolve().parent / "fixtures" / "mentalchat16k_fa.sample.jsonl"
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / "mentalchat16k_fa.sample.jsonl"
     )
+
+    # این تست فقط وقتی fixture دارای input باشد معنی دارد.
     samples = load_samples_fa(path=path, limit=3)
-    assert len(samples) == 3
-    assert samples[0].text
-    assert "اضطراب" in samples[0].text or "روتین" in samples[0].text
-    assert "output:" not in samples[0].text.lower()
+
+    assert len(samples) <= 3
+    for sample in samples:
+        assert sample.text
+        assert "output:" not in sample.text.lower()

@@ -158,37 +158,76 @@ class SemanticLabeler:
         threshold: float = config.LABEL_THRESHOLD,
         multi_label: bool = config.MULTI_LABEL,
     ) -> list[dict]:
+        """تبدیل scoreهای A–G به برچسب نهایی با پشتیبانی از NONE.
+
+        نکته‌ی مهم:
+        - ``best_label`` همیشه نزدیک‌ترین دسته‌ی خام را نگه می‌دارد.
+        - ``top_label`` فقط وقتی A–G است که حداقل یک دسته threshold را رد کند؛
+          در غیر این صورت ``NONE`` می‌شود.
+        - در حالت multi-label، فقط دسته‌هایی که score >= threshold دارند
+          داخل ``labels`` قرار می‌گیرند. اگر هیچ‌کدام قبول نشوند،
+          ``labels == ["NONE"]`` خواهد بود.
+        """
+        if scores.ndim != 2:
+            raise ValueError("scores must be a 2D array: (n_samples, n_categories)")
+        if scores.shape[1] > len(self.cat_keys):
+            raise ValueError(
+                "scores has more category columns than cat_keys: "
+                f"{scores.shape[1]} > {len(self.cat_keys)}"
+            )
+
         results: list[dict] = []
         order = np.argsort(scores, axis=1)[:, ::-1]
         n_categories = scores.shape[1]
 
         for i in range(scores.shape[0]):
             row_order = order[i]
-            top_idx = int(row_order[0])
-            top_cat = self.cat_keys[top_idx]
-            top_score = float(scores[i, top_idx])
+            best_idx = int(row_order[0])
+            best_cat = self.cat_keys[best_idx]
+            best_score = float(scores[i, best_idx])
+            confident = best_score >= threshold
 
             if multi_label:
                 above = [
-                    self.cat_keys[j]
+                    self.cat_keys[int(j)]
                     for j in row_order
-                    if scores[i, j] >= threshold
+                    if float(scores[i, int(j)]) >= threshold
                 ]
-                labels = above if above else [top_cat]
+                if above:
+                    labels = above
+                    top_label = best_cat
+                else:
+                    labels = ["NONE"]
+                    top_label = "NONE"
             else:
-                labels = [top_cat] if top_score >= threshold else ["NONE"]
+                if confident:
+                    labels = [best_cat]
+                    top_label = best_cat
+                else:
+                    labels = ["NONE"]
+                    top_label = "NONE"
 
             results.append({
-                "top_label": top_cat,
-                "top_score": round(top_score, 4),
+                # برچسب پذیرفته‌شده‌ی نهایی؛ ممکن است NONE باشد.
+                "top_label": top_label,
+
+                # نزدیک‌ترین دسته‌ی خام، حتی اگر threshold را رد نکرده باشد.
+                "best_label": best_cat,
+
+                # score نزدیک‌ترین دسته‌ی خام.
+                "top_score": round(best_score, 4),
+
+                # برچسب‌های پذیرفته‌شده بر اساس threshold.
                 "labels": labels,
+
                 "score_vector": {
                     self.cat_keys[j]: round(float(scores[i, j]), 4)
                     for j in range(n_categories)
                 },
-                "confident": top_score >= threshold,
+                "confident": confident,
             })
         return results
+
 
 
 def label_texts(

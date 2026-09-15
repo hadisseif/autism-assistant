@@ -18,25 +18,58 @@ def build_score_table(score_vector: dict[str, float]) -> pd.DataFrame:
 
 
 def render_label_result(result: dict) -> None:
+    """نمایش نتیجه‌ی یک متن، با نمایش صریح NONE در صورت رد threshold."""
     top_label = result["top_label"]
     title = CATEGORIES.get(top_label, {}).get("title_en", top_label)
     left, right = st.columns([2, 3])
+
     with left:
-        st.metric("Top category", f"{top_label} — {title}", delta=f"{result['top_score']:.4f}")
+        if top_label == "NONE":
+            st.metric(
+                "Accepted category",
+                "NONE",
+                delta=f"best score = {result['top_score']:.4f}",
+            )
+
+            best_label = result.get("best_label")
+            if best_label:
+                best_title = CATEGORIES.get(
+                    best_label, {}
+                ).get("title_en", best_label)
+                st.caption(
+                    f"Nearest category: {best_label} — {best_title}"
+                )
+
+            st.warning("No category passed the confidence threshold.")
+        else:
+            st.metric(
+                "Top category",
+                f"{top_label} — {title}",
+                delta=f"{result['top_score']:.4f}",
+            )
+
         st.markdown("**Labels:** " + ", ".join(result["labels"]))
-        st.write("✅ Confident" if result["confident"] else "⚠️ Below confidence threshold")
+        st.write(
+            "✅ Confident"
+            if result["confident"]
+            else "⚠️ Below confidence threshold"
+        )
+
     with right:
         score_df = build_score_table(result["score_vector"])
         st.bar_chart(score_df.set_index("Category")["Score"])
+
     st.dataframe(score_df, use_container_width=True, hide_index=True)
 
 
+
 def render_gap_summary(report: dict) -> None:
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Samples", report.get("n_samples", 0))
     c2.metric("Confident", f"{report.get('confident_rate', 0):.1%}")
+    c3.metric("NONE", f"{report.get('none_rate', 0):.1%}")
     ranking = report.get("ranking_weak_to_strong", [])
-    c3.metric("Weak → Strong", " → ".join(ranking) if ranking else "—")
+    c4.metric("Weak → Strong", " → ".join(ranking) if ranking else "—")
 
     pc = report.get("per_category", {})
     rows = []

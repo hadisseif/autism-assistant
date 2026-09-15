@@ -99,6 +99,8 @@ def summarize_run(report: dict, run_cfg: dict) -> dict:
         "dataset": run_cfg["dataset"],
         "n_samples": report["n_samples"],
         "confident_rate": report["confident_rate"],
+        "none_count": report.get("n_unlabeled_NONE", 0),
+        "none_rate": report.get("none_rate", 0.0),
         "mean_top_score": round(
             float(np.mean([pc[c]["mean_score"] for c in CATEGORY_KEYS
                            if pc[c]["count"] > 0] or [0.0])),
@@ -128,6 +130,8 @@ def build_comparison_table(summaries: list[dict]) -> pd.DataFrame:
             "fact_lang": s["fact_lang"],
             "n_samples": s["n_samples"],
             "confident_rate": s["confident_rate"],
+            "none_count": s.get("none_count", 0),
+            "none_rate": s.get("none_rate", 0.0),
             "mean_top_score": s["mean_top_score"],
             "weakest": " > ".join(s["ranking_weak_to_strong"][:2]),
             "strongest": " > ".join(s["ranking_weak_to_strong"][-2:]),
@@ -137,56 +141,71 @@ def build_comparison_table(summaries: list[dict]) -> pd.DataFrame:
             row[f"share_{c}"] = s["shares"][c]
             row[f"multi_{c}"] = s.get("multi_counts", {}).get(c, 0)
             row[f"mean_{c}"] = s["mean_scores"][c]
+
+        # NONE دسته‌ی معنایی نیست، اما برای مقایسه‌ی thresholdها باید
+        # count/share آن در جدول نهایی قابل مشاهده باشد.
+        row["count_NONE"] = s.get("none_count", 0)
+        row["share_NONE"] = s.get("none_rate", 0.0)
         rows.append(row)
     return pd.DataFrame(rows)
 
 
 def render_comparison_markdown(summaries: list[dict], table: pd.DataFrame) -> str:
+    top1_keys = list(CATEGORY_KEYS) + ["NONE"]
+
     lines = [
-        "# Five-way embedding comparison",
+        "# Embedding comparison",
         "",
-        "Persian MentalChat16K × autism facts (A–G).",
+        "Comparison of semantic labeling runs against autism facts (A–G).",
+        "`NONE` means that no A–G category passed the configured threshold.",
         "",
         "## Runs",
         "",
-        "| # | ID | Facts | Dataset | Model | Confident% | Mean top-score | Weak→Strong |",
-        "|---|----|-------|---------|-------|------------|----------------|-------------|",
+        "| # | ID | Facts | Dataset | Model | Confident% | NONE% | Mean top-score | Weak→Strong |",
+        "|---|----|-------|---------|-------|------------|-------|----------------|-------------|",
     ]
     for i, s in enumerate(summaries, start=1):
         lines.append(
             f"| {i} | `{s['id']}` | {s['fact_lang']} | {s['dataset']} | "
-            f"{s['model_key']} | {s['confident_rate']:.1%} | {s['mean_top_score']} | "
+            f"{s['model_key']} | {s['confident_rate']:.1%} | "
+            f"{s.get('none_rate', 0.0):.1%} | {s['mean_top_score']} | "
             f"{' → '.join(s['ranking_weak_to_strong'])} |"
         )
 
     lines += [
         "",
-        "## Category share (top-1 %)",
+        "## Category share (top-1 %) — including NONE",
         "",
-        "| Run | " + " | ".join(CATEGORY_KEYS) + " |",
-        "|-----|" + "|".join(["------"] * len(CATEGORY_KEYS)) + "|",
+        "| Run | " + " | ".join(top1_keys) + " |",
+        "|-----|" + "|".join(["------"] * len(top1_keys)) + "|",
     ]
     for s in summaries:
-        shares = " | ".join(f"{s['shares'][c]:.1%}" for c in CATEGORY_KEYS)
+        values = [s["shares"][c] for c in CATEGORY_KEYS]
+        values.append(s.get("none_rate", 0.0))
+        shares = " | ".join(f"{v:.1%}" for v in values)
         lines.append(f"| `{s['id']}` | {shares} |")
 
     lines += [
         "",
-        "## Category multi-label share (%)",
+        "## Category multi-label share (%) — including NONE status",
         "",
-        "| Run | " + " | ".join(CATEGORY_KEYS) + " |",
-        "|-----|" + "|".join(["------"] * len(CATEGORY_KEYS)) + "|",
+        "| Run | " + " | ".join(top1_keys) + " |",
+        "|-----|" + "|".join(["------"] * len(top1_keys)) + "|",
     ]
     for s in summaries:
-        multi = s.get("multi_shares") or {
-            c: 0.0 for c in CATEGORY_KEYS
-        }
-        shares = " | ".join(f"{multi[c]:.1%}" for c in CATEGORY_KEYS)
+        multi = s.get("multi_shares") or {c: 0.0 for c in CATEGORY_KEYS}
+        values = [multi[c] for c in CATEGORY_KEYS]
+        # NONE تنها زمانی رخ می‌دهد که هیچ A–G پذیرفته نشده باشد؛ در labels نیز
+        # به صورت [NONE] ثبت می‌شود، پس share آن همان none_rate است.
+        values.append(s.get("none_rate", 0.0))
+        shares = " | ".join(f"{v:.1%}" for v in values)
         lines.append(f"| `{s['id']}` | {shares} |")
 
     lines += [
         "",
         "## Category global mean similarity",
+        "",
+        "`NONE` در این جدول وجود ندارد، چون prototype/embedding مستقلی برای NONE تعریف نشده است.",
         "",
         "| Run | " + " | ".join(CATEGORY_KEYS) + " |",
         "|-----|" + "|".join(["------"] * len(CATEGORY_KEYS)) + "|",
@@ -201,14 +220,14 @@ def render_comparison_markdown(summaries: list[dict], table: pd.DataFrame) -> st
         "## Notes for interpretation",
         "",
         "- Runs 1–3 use **Persian facts × English dataset** to compare three encoders "
-        "on the original MentalChat16K (task 1 rerun + two stronger multilingual models).",
-        "- Runs 4–5 use **Persian facts × Persian dataset** after GPT-4+ translation "
+        "on the original MentalChat16K.",
+        "- Runs 4–5 use **Persian facts × Persian dataset** after translation "
         "(matched-language condition).",
-        "- Labeling uses **patient-only** text by default (skips the repeated "
-        "counselor prompt and therapy reply that used to collapse almost all "
-        "samples onto category F).",
-        "- Prefer models whose category ranking is stable and whose confident_rate "
-        "is not dominated by a single category unless that matches domain priors.",
+        "- Labeling uses **patient-only** text by default.",
+        "- `NONE` is not an eighth autism category. It is a rejection status: no A–G "
+        "score reached the configured threshold.",
+        "- Because cosine-score scales differ across embedding models, `NONE%` and "
+        "confident_rate should be interpreted together with model-specific threshold calibration.",
         "",
         f"Full numeric table also saved as `comparison_summary.csv` "
         f"({len(table)} rows).",
@@ -218,22 +237,34 @@ def render_comparison_markdown(summaries: list[dict], table: pd.DataFrame) -> st
 
 
 def plot_comparison(summaries: list[dict], out_path: Path) -> None:
+    """Top-1 share را برای A–G به‌همراه NONE بین runها مقایسه می‌کند."""
     if not summaries:
         return
+
+    plot_keys = list(CATEGORY_KEYS) + ["NONE"]
     n_runs = len(summaries)
-    n_cats = len(CATEGORY_KEYS)
-    x = np.arange(n_cats)
+    x = np.arange(len(plot_keys))
     width = 0.8 / max(n_runs, 1)
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(13, 6.5))
+
     for i, s in enumerate(summaries):
         shares = [s["shares"][c] * 100 for c in CATEGORY_KEYS]
-        ax.bar(x + i * width, shares, width=width, label=s["id"])
+        shares.append(s.get("none_rate", 0.0) * 100)
+
+        ax.bar(
+            x + i * width,
+            shares,
+            width=width,
+            label=s["id"],
+        )
+
     ax.set_xticks(x + width * (n_runs - 1) / 2)
-    ax.set_xticklabels(CATEGORY_KEYS)
-    ax.set_ylabel("Top-1 share (%)")
-    ax.set_title("Category distribution across comparison runs")
+    ax.set_xticklabels(plot_keys)
+    ax.set_ylabel("Top-1 / NONE share (%)")
+    ax.set_title("Accepted category distribution across comparison runs (A–G + NONE)")
     ax.legend(fontsize=8)
+
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
     plt.close(fig)

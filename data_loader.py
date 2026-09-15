@@ -2,6 +2,13 @@
 
 - en: ShenLab/MentalChat16K از Hugging Face
 - fa: فایل محلی JSONL/CSV در config.PERSIAN_DATASET_PATH (یا مسیر سفارشی)
+
+قاعده‌ی مهم برای تحلیل semantic similarity:
+- در حالت ``patient`` فقط فیلد ``input`` معتبر است.
+- اگر ``input`` وجود نداشته باشد یا خالی باشد، رکورد skip می‌شود.
+- هیچ fallbackای به instruction / output / text انجام نمی‌شود.
+
+این رفتار از آلودگی semantic analysis با prompt ثابت یا پاسخ مشاور جلوگیری می‌کند.
 """
 from __future__ import annotations
 
@@ -29,18 +36,15 @@ def _clean(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _is_generic_counselor_prompt(text: str) -> bool:
-    low = text.lower()
-    return any(marker in low for marker in config.GENERIC_COUNSELOR_MARKERS)
-
-
 def _parse_tagged_text(text: str) -> dict[str, str]:
-    """Parse `instruction: ...\\ninput: ...\\noutput: ...` blocks."""
+    """Parse `instruction: ...\ninput: ...\noutput: ...` blocks."""
     buckets: dict[str, list[str]] = {k: [] for k in _TAGGED_FIELDS}
     current: str | None = None
+
     for line in text.splitlines():
         stripped = line.strip()
         matched = None
+
         for key in _TAGGED_FIELDS:
             prefix = f"{key}:"
             if stripped.lower().startswith(prefix):
@@ -50,24 +54,36 @@ def _parse_tagged_text(text: str) -> dict[str, str]:
                 if rest:
                     buckets[key].append(rest)
                 break
+
         if matched is None and current:
             buckets[current].append(line.rstrip())
-    return {k: "\n".join(v).strip() for k, v in buckets.items() if "".join(v).strip()}
+
+    return {
+        k: "\n".join(v).strip()
+        for k, v in buckets.items()
+        if "".join(v).strip()
+    }
 
 
 def _field_map(row: dict) -> dict[str, str]:
+    """استخراج instruction/input/output از ستون‌های صریح یا text تگ‌دار."""
     fields: dict[str, str] = {}
+
     for key in _TAGGED_FIELDS:
         val = _clean(row.get(key))
         if val:
             fields[key] = val
+
     raw = _clean(row.get("text"))
     if raw:
         parsed = _parse_tagged_text(raw)
         for key, val in parsed.items():
             fields.setdefault(key, val)
+
+        # فقط برای mode=all نگه داشته می‌شود. در patient mode fallback نیست.
         if not parsed:
             fields.setdefault("text", raw)
+
     return fields
 
 
@@ -82,17 +98,24 @@ def _merge_fields(row: dict, fields: tuple[str, ...]) -> str:
 
 
 def extract_label_text(row: dict, mode: str | None = None) -> str:
-    """متن مورد استفاده برای لیبل‌گذاری.
+    """متن مورد استفاده برای semantic labeling.
 
-    patient: شرح مراجع (input). پرامپت تکراری مشاور و پاسخ درمانی حذف می‌شود
-    تا دستهٔ F به‌خاطر زبان حمایت/درمان همه‌ی نمونه‌ها را نبرد.
-    all: رفتار قبلی — instruction + input + output (یا کل فیلد text).
+    patient:
+        فقط ``input`` استفاده می‌شود. اگر input وجود نداشته باشد یا خالی باشد،
+        رشته‌ی خالی برگردانده می‌شود و loader آن رکورد را skip می‌کند.
+        هیچ fallbackای به instruction، output یا text وجود ندارد.
+
+    all:
+        instruction + input + output (یا text خام در صورت نبود ساختار تگ‌دار).
+        این حالت فقط برای آزمایش/ablation نگه داشته شده است و برای تحلیل اصلی
+        patient-side توصیه نمی‌شود.
     """
     mode = (mode or config.LABEL_TEXT_MODE).lower().strip()
     if mode not in {"patient", "all"}:
         raise ValueError(f"Unsupported label text mode {mode!r}. Use patient|all.")
 
     fields = _field_map(row)
+
     if mode == "all":
         merged = _merge_fields(
             {k: fields.get(k, "") for k in _TAGGED_FIELDS},
@@ -100,24 +123,19 @@ def extract_label_text(row: dict, mode: str | None = None) -> str:
         )
         return merged or fields.get("text", "")
 
-    inp = fields.get("input", "")
-    if inp:
-        return inp
-
-    inst = fields.get("instruction", "")
-    if inst and not _is_generic_counselor_prompt(inst):
-        return inst
-
-    raw = fields.get("text", "")
-    if raw and not _is_generic_counselor_prompt(raw):
-        return raw
-
-    return inp or inst or fields.get("output", "") or raw
+    # STRICT patient-only mode:
+    # فقط input مجاز است؛ نبود input => رکورد باید skip شود.
+    return _clean(fields.get("input", ""))
 
 
-def _row_to_text(row: dict, fields: tuple[str, ...], mode: str | None = None) -> str:
-    """متن لیبل از ردیف؛ fields فقط برای سازگاری با حالت all استفاده می‌شود."""
+def _row_to_text(
+    row: dict,
+    fields: tuple[str, ...],
+    mode: str | None = None,
+) -> str:
+    """تبدیل یک ردیف دیتاست به متن قابل embedding."""
     mode = (mode or config.LABEL_TEXT_MODE).lower().strip()
+
     if mode == "all":
         mapped = _field_map(row)
         merged = _merge_fields(
@@ -127,11 +145,15 @@ def _row_to_text(row: dict, fields: tuple[str, ...], mode: str | None = None) ->
         if merged:
             return merged
         return mapped.get("text", "")
+
     return extract_label_text(row, mode=mode)
 
 
 def load_samples_en(limit: int | None = None) -> list[Sample]:
-    """بارگذاری MentalChat16K انگلیسی از Hugging Face."""
+    """بارگذاری MentalChat16K انگلیسی از Hugging Face.
+
+    در حالت patient فقط رکوردهای دارای input غیرخالی نگه داشته می‌شوند.
+    """
     if limit is not None and limit <= 0:
         limit = None
 
@@ -151,19 +173,38 @@ def load_samples_en(limit: int | None = None) -> list[Sample]:
     fields = tuple(f for f in config.DATASET_TEXT_FIELDS if f in cols)
     if not fields:
         fields = tuple(c for c in cols if ds.features[c].dtype == "string")
+
     mode = config.LABEL_TEXT_MODE
     print(f"[data_loader] Using text fields: {fields} | mode={mode}")
 
     n = len(ds) if limit is None else min(limit, len(ds))
     samples: list[Sample] = []
+    skipped_missing_input = 0
+
     for i in range(n):
         row = ds[i]
         text = _row_to_text(row, fields, mode=mode)
+
         if not text:
+            if mode == "patient":
+                skipped_missing_input += 1
             continue
-        samples.append(Sample(idx=i, text=text, meta={k: row[k] for k in fields}))
+
+        samples.append(
+            Sample(
+                idx=i,
+                text=text,
+                meta={k: row[k] for k in fields},
+            )
+        )
 
     print(f"[data_loader] Prepared {len(samples)} English samples.")
+    if mode == "patient":
+        print(
+            f"[data_loader] Skipped {skipped_missing_input} rows "
+            "because input was missing/empty."
+        )
+
     return samples
 
 
@@ -171,11 +212,15 @@ def load_samples_fa(
     path: str | Path | None = None,
     limit: int | None = None,
 ) -> list[Sample]:
-    """بارگذاری دیتاست فارسی از JSONL یا CSV.
+    """بارگذاری دیتاست فارسی از JSONL/CSV/TSV/JSON.
 
-    قالب‌های پذیرفته‌شده:
-    - JSONL: هر خط یک آبجکت با فیلد text یا instruction/input/output
-    - CSV: ستون text یا همان فیلدهای MentalChat16K
+    در حالت patient، همانند دیتاست انگلیسی فقط فیلد input پذیرفته می‌شود.
+    بنابراین فایل فارسی نیز باید input ترجمه‌شده را نگه دارد.
+
+    نکته:
+        اگر فایل فارسی فعلی فقط ستون ``text`` دارد، در mode=patient رکوردهای آن
+        عمداً skip می‌شوند. برای Runهای فارسی باید خروجی ترجمه در فیلد ``input``
+        ذخیره شود تا ساختار EN و FA یکسان و قابل‌مقایسه بماند.
     """
     if limit is not None and limit <= 0:
         limit = None
@@ -185,12 +230,13 @@ def load_samples_fa(
         raise FileNotFoundError(
             f"Persian dataset not found: {fa_path}\n"
             "Export English records with `python export_for_translation.py`, "
-            "translate them (GPT-4 + prompts/semantic_persian_translation.txt), "
-            "then save as data/mentalchat16k_fa.jsonl."
+            "translate them, then save the translated patient text in the `input` "
+            "field of data/mentalchat16k_fa.jsonl."
         )
 
     print(f"[data_loader] Loading Persian dataset from {fa_path} ...")
     suffix = fa_path.suffix.lower()
+
     if suffix == ".jsonl":
         rows: list[dict] = []
         with fa_path.open(encoding="utf-8") as f:
@@ -199,10 +245,12 @@ def load_samples_fa(
                 if not line:
                     continue
                 rows.append(json.loads(line))
+
     elif suffix in {".csv", ".tsv"}:
         sep = "\t" if suffix == ".tsv" else ","
         df = pd.read_csv(fa_path, sep=sep, encoding="utf-8")
         rows = df.to_dict(orient="records")
+
     elif suffix == ".json":
         payload = json.loads(fa_path.read_text(encoding="utf-8"))
         if isinstance(payload, dict) and "data" in payload:
@@ -211,27 +259,47 @@ def load_samples_fa(
             rows = payload
         else:
             raise ValueError(f"Unsupported JSON structure in {fa_path}")
+
     else:
         raise ValueError(
-            f"Unsupported Persian dataset format '{suffix}'. Use .jsonl/.csv/.json"
+            f"Unsupported Persian dataset format '{suffix}'. "
+            "Use .jsonl/.csv/.tsv/.json"
         )
 
     fields = config.DATASET_TEXT_FIELDS
     mode = config.LABEL_TEXT_MODE
     samples: list[Sample] = []
+    skipped_missing_input = 0
+
     for i, row in enumerate(rows):
         if limit is not None and len(samples) >= limit:
             break
+
         text = _row_to_text(row, fields, mode=mode)
         if not text:
+            if mode == "patient":
+                skipped_missing_input += 1
             continue
-        idx = int(row["idx"]) if "idx" in row and str(row["idx"]).isdigit() else i
+
+        idx = (
+            int(row["idx"])
+            if "idx" in row and str(row["idx"]).isdigit()
+            else i
+        )
+
         meta = {k: row.get(k) for k in fields if k in row}
         if "text" in row:
             meta["text"] = row["text"]
+
         samples.append(Sample(idx=idx, text=text, meta=meta))
 
     print(f"[data_loader] Prepared {len(samples)} Persian samples (mode={mode}).")
+    if mode == "patient":
+        print(
+            f"[data_loader] Skipped {skipped_missing_input} Persian rows "
+            "because input was missing/empty."
+        )
+
     return samples
 
 
@@ -240,22 +308,24 @@ def load_samples(
     dataset: str = "en",
     path: str | Path | None = None,
 ) -> list[Sample]:
-    """بارگذاری نمونهها.
+    """بارگذاری نمونه‌ها.
 
     Args:
         limit: حداکثر تعداد نمونه. None یا 0 یعنی کل.
         dataset: "en" | "fa" | مسیر فایل
-        path: مسیر صریح برای دیتاست فارسی (یا هر فایل محلی)
+        path: مسیر صریح برای دیتاست فارسی/محلی
     """
     if limit is not None and limit <= 0:
         limit = None
 
     ds = (dataset or "en").strip()
-    # مسیر فایل به‌عنوان dataset
     maybe_path = Path(ds)
-    if path is not None or maybe_path.suffix.lower() in {
-        ".jsonl", ".csv", ".tsv", ".json"
-    } or maybe_path.exists():
+
+    if (
+        path is not None
+        or maybe_path.suffix.lower() in {".jsonl", ".csv", ".tsv", ".json"}
+        or maybe_path.exists()
+    ):
         return load_samples_fa(path=path or ds, limit=limit)
 
     key = ds.lower()
@@ -263,13 +333,14 @@ def load_samples(
         return load_samples_en(limit=limit)
     if key in {"fa", "persian", "farsi"}:
         return load_samples_fa(path=path, limit=limit)
+
     raise ValueError(
         f"Unknown dataset '{dataset}'. Use en|fa or a path to jsonl/csv."
     )
 
 
 if __name__ == "__main__":
-    s = load_samples(limit=5, dataset="en")
-    for x in s:
+    samples = load_samples(limit=5, dataset="en")
+    for sample in samples:
         print("-" * 60)
-        print(x.text[:300])
+        print(sample.text[:300])
